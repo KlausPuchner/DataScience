@@ -1,0 +1,860 @@
+---
+title: "Taiwan Credit Card Payment Default Identification"
+subtitle: "Capstone Project Report for HarvardX Professional Data Science Certificate"
+author: "Klaus Puchner"
+date: "June 10th, 2019"
+output: 
+  pdf_document: 
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Set System locale
+Sys.setlocale(category = "LC_ALL", locale = "en_US.UTF-8")
+
+# Initialize available CPU cores
+library(doParallel) # for enabling usage of more cpu cores
+parallelCluster <- makeCluster(detectCores())
+
+# System Information
+library(benchmarkme) 
+
+```
+
+# Executive Summary
+In this project we will use this data and format/tidy the data in a first step for an exploratory data analysis (EDA). After the EDA, machine leaning algorithms for this classification problem will be used to predict whether a customer payment default occurs or not. For this project, the "default of creadit card clients data set" from the [**UCI Machine Learning Repository**](https://archive.ics.uci.edu/ml/datasets/default+of+credit+card+clients) is used. 
+
+The dataset chosen for this project contains observations about a credit card company's customer payment defaults in Taiwan. From the perspective of risk management, the result of predictive accuracy of the estimated probability of default will be more valuable than the binary result of classification - credible or not credible clients. The data is an Excel sheet with 30,000 observations on the following 24 variables:
+
+* **Personal data**
+  + **limit_bal:** Amount of the given credit (in NT$)
+  + **sex:** Gender (1 = male; 2 = female)
+  + **education:** Education (1 = graduate school; 2 = university; 3 = high school; 4 = others)
+  + **marriage:** Martial status (1 = married; 2 = single; 3 = others)
+  + **age** Age (years)
+
+* **Past monthly repayments** (-1 = pay duly; 1 = payment delay for one month; 2 = payment delay for two months; ...; 8 = payment delay for eight months; 9 = payment delay for nine months and above)
+  + **pay_0:** September
+  + **pay_2:** August
+  + **pay_3:** July
+  + **pay_4:** June
+  + **pay_5:** May
+  + **pay_6:** April   
+  
+* **Amount of bill statement** (in NT$)
+  + **bill_amt1:** September
+  + **bill_amt2:** August
+  + **bill_amt3:** July
+  + **bill_amt4:** June
+  + **bill_amt5:** May
+  + **bill_amt6:** April
+
+* **Amount of previous payment** (in NT$)
+  + **pay_amt1:** September
+  + **pay_amt2:** August
+  + **pay_amt3:** July
+  + **pay_amt4:** June
+  + **pay_amt5:** May
+  + **pay_amt6:** April
+
+* **default_payment_next_month** (our target variable: is it a payment default or not)
+
+# Methods and Analysis
+The particular steps are documented in detail by the comments next to the corresponding code. First we introduce the system environment used for this project, then we introduce and load the necessary libraries. After that we proceed with the data wrangling in order to analyze our predictor variables and their respective relation to the target variable. Next we train eight different models and compare them in respect of their predicting performance.  
+
+## System Environment
+
+To ease the reproducability of this project, we take a look at the (technical) infrastructure used for this project:
+
+```{r project-environment, message=FALSE, warning=FALSE}
+
+# Show software versions, parameters and packages
+sessionInfo()
+
+# Show CPU and memory
+cbind(as.data.frame(get_cpu()), 
+      memory = paste0(as.character(round(get_ram()/1024^3)),"GB"))
+
+```
+
+## Load Libraries
+Throughout this project, more than just basic R functionality is needed. Thus we load and use additional packages. 
+
+```{r librarysection, message=FALSE, warning=FALSE}
+library(tidyverse) # For using R the tidy(verse) way
+library(readxl) # for reading excel files
+library(janitor) #For cleaning variable names
+library(caret) # For machine learning tasks
+library(lubridate) # For time processing
+library(caretEnsemble) # For making model ensembles
+library(ranger) # For random forest models
+library(glmnet) # For glm network models
+library(naivebayes) # For naivebayes models
+library(C50) # For C50 models
+library(DMwR) # For SMOTE sampling
+```
+
+## Data Preparation
+Our starting point is the creation of a new folder, in which the dataset will be downloaded into:
+
+```{r download, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We create a folder for the dataset... 
+dir.create("data/")
+
+# ...and we download it
+download.file("https://tinyurl.com/y2ewr9e7","data/CreditDataSet.xls")
+
+# Then we read the dataset into a tibble with clean names, correctly format submitted_date  
+# as date object and only used data from 2017 and 2018 
+dataset <- read_excel(path = "data/CreditDataSet.xls", col_names = TRUE, trim_ws = TRUE,
+                      skip = 1) %>% clean_names() %>% select(-id) %>% as.data.frame()
+
+# Let's see what variables and character types we have so far
+dataset %>% glimpse()
+
+# Let's also see if there are missing values within our dataset
+# Our dataset seems to have no missing values 
+dataset %>% anyNA()
+
+```
+
+Now we have insight which variables, how many observations, which data types our dataset contains. We also already saw that there are some values missing. One by one, we will now tidy the data sets' variables for our exploratory data analysis.
+
+```{r wrangling, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 1: "limit_bal" ###############
+
+# We take a look at the distribution
+dataset$limit_bal %>% summary()
+
+# Double is a suitable type, so we have nothing to do
+dataset$limit_bal %>% typeof()
+
+############### Variable 2: "sex" ###############
+
+# Are there any strange values? No
+dataset$sex %>% unique()
+
+# Sex is currently integer, but we want it to be a factor...
+dataset$sex %>% typeof()
+
+# ...so we convert sex  
+dataset <- dataset %>% mutate(sex = as_factor(ifelse(sex == 1, "male", "female")))
+
+############### Variable 3: "education" ###############
+
+# Are there any strange values? Yes, the values 5, 6 and 0 are not correct...
+dataset$education %>% unique()
+
+# ...so we get rid of them (345 observations)
+dataset <- dataset %>% filter(education > 0) %>% filter(education < 5)
+
+# Education is currently double, but we want it to be a factor...
+dataset$education %>% typeof()
+
+# ...so we convert education 
+dataset <- dataset %>% mutate(education = as_factor(case_when(
+  education == 1 ~ "graduate.school",
+  education == 2 ~ "university",
+  education == 3 ~ "high.school",
+  TRUE ~ "others")))
+
+############### Variable 4: "marriage" ###############
+
+# Are there any strange values? Yes, the value 0 is not correct... 
+dataset$marriage %>% unique()
+
+# ...so we get rid of them (54 observations)
+dataset <- dataset %>% filter(marriage != 0)
+
+# Education is currently double, but we want it to be a factor...
+dataset$marriage %>% typeof()
+
+# ...so we convert education 
+dataset <- dataset %>% mutate(marriage = as_factor(case_when(
+  marriage == 1 ~ "married",
+  marriage == 2 ~ "single",
+  marriage == 3 ~ "others",
+  TRUE ~ "others")))
+  
+############### Variable 5: "age" ###############
+
+# We take a look at the distribution
+dataset$age %>% summary()
+
+# Double is a suitable type, so we have nothing to do
+dataset$age %>% typeof()
+  
+############### Variable 6 - 11: "past monthly repayments" ###############
+
+# We want the variables renamed...
+dataset$pay_0 %>% typeof()
+
+# ...so we rename them to have more self-explaining names
+dataset <- dataset %>% rename(pay_delay_sep = pay_0, pay_delay_aug = pay_2, 
+                              pay_delay_jul = pay_3,pay_delay_jun = pay_4, 
+                              pay_delay_may = pay_5, pay_delay_apr = pay_6)
+
+############### Variable 12 - 17: "Amount of bill statement" ###############
+
+# We want the variables renamed...
+dataset$bill_amt1 %>% typeof()
+
+# ...so we rename them to have more self-explaining names
+dataset <-dataset %>% rename(bill_sep = bill_amt1, bill_aug = bill_amt2, 
+                             bill_jul = bill_amt3, bill_jun = bill_amt4, 
+                             bill_may = bill_amt5, bill_apr = bill_amt6)
+
+############### Variable 18 - 23: "Amount of previous payment" ###############
+
+# We want the variables renamed...
+dataset$pay_amt1 %>% typeof()
+
+# ...so we rename them to have more self-explaining names
+#dataset <- 
+dataset <- dataset %>% rename(prev_payed_sep = pay_amt1, prev_payed_aug = pay_amt2,
+                              prev_payed_jul = pay_amt3, prev_payed_jun = pay_amt4,
+                              prev_payed_may = pay_amt5, prev_payed_apr = pay_amt6)
+
+############### Variable 24: "Default payment next month" ###############
+
+# default_payment_next_month is currently double, but we want it to be a factor...
+dataset$default_payment_next_month %>% typeof()
+
+# ...so we convert it  
+dataset <- dataset %>% rename(payment_default = default_payment_next_month) %>%  
+  mutate(payment_default = as_factor(ifelse(payment_default == 1, "default", "non_default")))
+
+```
+
+## Data Statstics
+After cleaning and tidying our data we now have a look at the overall dataset statistics.
+
+```{r statistics, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We take a look at the dataset structure
+dataset %>% str()
+
+# We take a look at the statistics of payment defaults
+dataset %>% filter(payment_default == "default") %>% summary()
+
+# We also take a look at the statistics of the non payment defaults
+dataset %>% filter(payment_default == "non_default") %>% summary()
+
+# We set parameters for our following plots: scales and strip
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+log10scalex <- list(x = list(log = 10))
+log10scaley <- list(y = list(log = 10))
+strip <- strip.custom(par.strip.text=list(cex=.7))
+
+```
+
+Our target variable consists of two imbalanced classes within "payment_default" with 6605 (~22% default) vs 22996 (~78% non-default) observations. Additionally, our potential predictors in the dataset look quite skewed. We will take care of the imbalance problem later with SMOTE upsampling.
+
+### Variable 1: limit_bal
+
+```{r statistics-limit_bal, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 1: "limit_bal" ###############
+featurePlot(x = dataset$limit_bal, y = dataset$payment_default, plot = "density", 
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset$limit_bal, y = dataset$payment_default, plot = "box", 
+            strip = strip, scales = scales)
+dataset$limit_bal %>% as.numeric() %>% summary()
+
+```
+
+We can see that defaults happen more often if the limit balance is at around 50,000. We also see that customers with payment defaults tendencially have a lower limit balance (probably because they were rated worse beforehand).   
+
+### Variable 2: sex
+
+```{r statistics-sex, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 2: "sex" ###############
+featurePlot(x = as.numeric(dataset$sex), y = dataset$payment_default, plot = "density",
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+dataset$sex %>% summary()
+
+```
+
+We assume that females (1) tend to have a higher occurence of both, "default" as well as "non-default". Males (2) show a lower overall occurence of being "default" or "non-default", but both outcomes approximate to each other. But this might also be a bit misleading, since we have 17855 females and 11746 males in our dataset, a 60/40 splilt.
+
+### Variable 3: education
+
+```{r statistics-education, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 3: "education" ###############
+featurePlot(x = as.numeric(dataset$education), y = dataset$payment_default, plot = "density", 
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+dataset$education %>% summary()
+
+```
+
+Education seems to have an impact on defaults and non-defaults. Persons that only finished graduate school (1) have the highest rate of defaults, which is significantly reduced if the person holds a high school (3) diploma. Interestingly university graduates (2) also have a lower default rate than graduate school graduates, but a higher default rate than high school graduates (3). What we can also learn from our dataset is that there university graduates (2) seem to be less of a default risk compared to the other groups. Since we don't know what exactly "others" includes we will not make any assumptions here.
+
+### Variable 4: marriage
+
+```{r statistics-marriage, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 4: "marriage" ###############
+featurePlot(x = as.numeric(dataset$marriage), y = dataset$payment_default, plot = "density",
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+dataset$marriage %>% summary()
+
+```
+
+The data in our dataset shows that, nevertheless if being married (1) or not (2), defaults are approximately on the same level. In fact singles (2) seem to have a higher chance of being non-default. Again, we can hardly make any assumptions on "others" (3), so we will just leave it there. Around 45% are married, 54% are single and around 1% are others.
+
+### Variable 5: age
+
+```{r statistics-age, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 5: "age" ###############
+featurePlot(x = dataset$age, y = dataset$payment_default, plot = "density", strip = strip,
+            scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset$age, y = dataset$payment_default, plot = "box", strip = strip, 
+            scales = scales)
+dataset$age %>% summary()
+
+```
+
+When looking at the age and (non-)default relationship we learn that defaults and non-defaults are approximately homogenous over all ages. The only significant exception is between around 30 and 40, where we can find a larger gap between non-defaults and defaults.
+
+### Variable 6-11: past monthly payments
+
+```{r statistics-payment-delays, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 6 - 11: "past monthly repayments" ###############
+featurePlot(x = dataset[,6:11], y = dataset$payment_default, plot = "density", strip = strip,
+            scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset[,6:11], y = dataset$payment_default, plot = "box", strip = strip,
+            scales = scales)
+dataset[,6:11] %>% summary()
+
+```
+
+The patterns in all of the six months are approximately similar. We also do not find a normal distribution here (as one might have previously assumed).
+
+### Variable 12-17: bill statement amount
+
+```{r statistics-bill-amount, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 12 - 17: "Amount of bill statement" ###############
+featurePlot(x = dataset[,12:17], y = dataset$payment_default, plot = "density", 
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset[,12:17], y = dataset$payment_default, plot = "box", strip = strip,
+            scales = log10scaley)
+dataset[,12:17] %>% summary()
+
+```
+
+Bill amount does not provide that much new insights since defaults and non-defaults are approximately equal (except a few outliers).
+
+### Variable 18-23: previous payments
+
+```{r statistics-previous-payment, echo=TRUE, message=FALSE, warning=FALSE}
+
+############### Variable 18 - 23: "Amount of previous payment" ###############
+featurePlot(x = dataset[,18:23], y = dataset$payment_default, plot = "density", 
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset[,18:23], y = dataset$payment_default, plot = "box", strip = strip,
+            scales = log10scaley)
+dataset[,18:23] %>% summary()
+
+```
+
+Like bill amount, previously payed does not provide that much new insights either. Instead of those two variables it might be interesting to introduce a new variable that shows if the billed amount was fully, partially or not paid (to represent the payment habit instead of a variety of financial figures without context).
+
+### Variable 25-30: repay rate
+
+```{r statistics-repay-rate, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We make sure we do not get NaN and Inf by taking care of zeros in our columns, 
+# set negative payments to zero (since we define this as "nothing was payed"), 
+# set positive values above one back to one (we also define overpaid as paid) and
+# calculate the ratio of partially paid bills (proportion of billed to payd)
+dataset <- dataset %>% 
+  mutate(repay_rate_sep = ifelse(bill_sep == 0, 0, 
+                                 ifelse(prev_payed_sep == 0, 0,
+                                        ifelse(prev_payed_sep/bill_sep > 1, 1,
+                                               ifelse(prev_payed_sep/bill_sep <= 0, 0,
+                                                      prev_payed_sep/bill_sep)))),
+         repay_rate_aug = ifelse(bill_aug == 0, 0, 
+                                 ifelse(prev_payed_aug == 0, 0,
+                                        ifelse(prev_payed_aug/bill_aug > 1, 1,
+                                               ifelse(prev_payed_aug/bill_aug <= 0, 0,
+                                                      prev_payed_aug/bill_aug)))),
+         repay_rate_jul = ifelse(bill_jul == 0, 0, 
+                                 ifelse(prev_payed_jul == 0, 0,
+                                        ifelse(prev_payed_jul/bill_jul > 1, 1,
+                                               ifelse(prev_payed_jul/bill_jul <= 0, 0,
+                                                      prev_payed_jul/bill_jul)))),
+         repay_rate_jun = ifelse(bill_jun == 0, 0, 
+                                 ifelse(prev_payed_jun == 0, 0,
+                                        ifelse(prev_payed_jun/bill_jun > 1, 1,
+                                               ifelse(prev_payed_jun/bill_jun <= 0, 0,
+                                                      prev_payed_jun/bill_jun)))),
+         repay_rate_may = ifelse(bill_may == 0, 0, 
+                                 ifelse(prev_payed_may == 0, 0,
+                                        ifelse(prev_payed_may/bill_may > 1, 1,
+                                               ifelse(prev_payed_may/bill_may <= 0, 0,
+                                                      prev_payed_may/bill_may)))),
+         repay_rate_apr = ifelse(bill_apr == 0, 0, 
+                                 ifelse(prev_payed_apr == 0, 0,
+                                        ifelse(prev_payed_apr/bill_apr > 1, 1,
+                                               ifelse(prev_payed_apr/bill_apr <= 0, 0,
+                                                      prev_payed_apr/bill_apr))))) 
+
+# Then we plot our new variables
+featurePlot(x = dataset[,25:30], y = dataset$payment_default, plot = "density", 
+            strip = strip, scales = scales, auto.key = list(columns = 2))
+featurePlot(x = dataset[,25:30], y = dataset$payment_default, plot = "box", 
+            strip = strip, scales = scales)
+dataset[,25:30] %>% summary()
+
+```
+
+The new variables indeed show something interesting: persons who monthly repayed between 0 and 10% of the billed payments back have a significantly higher risk of being a payment default.
+
+## Modeling
+We want to predict if a customer will be a payment default or not, so we are talking about a classification problem. Since we have a lot of observations in our data set, we will use an 80/20 split ratio.
+
+```{r modeling-ml-split, echo=TRUE, message=FALSE, warning=FALSE}
+
+############## Create reduced dataset for model testing ############## 
+
+# Set seed fo reproducible results
+set.seed(42)
+
+# We generate a an 80/20 split...
+split <- createDataPartition(dataset$payment_default, p = 0.8, list = FALSE, times = 1)
+
+# ...and use it for creating our test and train data
+train <- dataset[split,]
+train.x <- train %>% select(-payment_default)
+train.y <- train$payment_default
+test <- dataset[-split,]
+test.x <- test %>% select(-payment_default)
+test.y <- test$payment_default
+
+rm(dataset, split)
+
+```
+
+In order to use the caret package training features properly, we will create a one hot encoded matrix and avoid using the formula interface. By not using the formula interface caret uses less system ressources but we also need to separate the predictor variables from the target variable for both: the train and the test data.
+
+```{r modeling-dummyvariables, echo=TRUE, message=FALSE, warning=FALSE}
+
+############## Create dummy variables (one hot encoding) ############## 
+
+# Since caret assumes that all of the data are numeric, we need to create dummy variables
+dummyVariables <- dummyVars(payment_default ~ ., data = train)
+dummyVariables
+
+# We create our one hot encoded x-values...
+train.x <- data.frame(predict(dummyVariables, newdata = train))
+
+# ...as well as our y-values
+train.y <- train$payment_default
+
+train <- train.x
+train$payment_default <- train.y
+
+# We also need dummy variables for our test set
+dummyVariables <- dummyVars(payment_default ~ ., data = test)
+dummyVariables
+
+# We create our one hot encoded x-values...
+test.x <- data.frame(predict(dummyVariables, newdata = test))
+
+# ...as well as our y-values
+test.y <- test$payment_default
+
+test <- test.x
+test$payment_default <- test.y
+
+rm(dummyVariables)
+```
+
+We know that we have a calss imbalance in our target variable. To tackle this issue, we will use the SMOTE (synthetic minority over-sampling techniqe) package in order to generate more minority-class observations.
+
+```{r smote-sampling, echo=TRUE, message=FALSE, warning=FALSE}
+
+################ Reducing the class imbalance with SMOTE ################ 
+
+set.seed(42)
+train <- SMOTE(form = payment_default ~ ., data = train)
+
+# Let's see if it worked...
+train %>%
+  group_by(payment_default) %>% summarize(n = n()) %>% ungroup() %>%
+  mutate(percent = round(n/sum(n)*100, 3)) %>% arrange(desc(n))
+
+train.x <- train %>% select(-payment_default)
+train.y <- train$payment_default
+
+rm(train.smote)
+
+```
+
+Now that we have generated more default-observations based on our dataset and reduced the imbalance between our two classes, we can define the common training parameters for our models:
+
+```{r traincontrol, echo=TRUE, message=FALSE, warning=FALSE}
+
+############## Train model ############## 
+
+metric <- "ROC"
+
+TrainControl <- trainControl(method = "repeatedcv", 
+                             number = 10,
+                             repeats = 3,
+                             summaryFunction = twoClassSummary,
+                             verboseIter = FALSE,
+                             classProbs = TRUE,
+                             savePredictions = TRUE,
+                             allowParallel = TRUE)
+
+```
+
+In this train control settings, we defined a 10-fold cross validation with 3 repetitions. Since we will use more than one cpu core, verboseIter does not make sense (nothing is shown in this scenario). We also want caret to calculate class probabilities and save predictions.
+
+In this project, we will ebvaluate the performance of different models for our dataset. Each model will be trained and tuned to get the best results possible and compared to each other.
+
+### C5.0
+
+```{r model-c50, echo=TRUE, message=FALSE, warning=FALSE}
+                             
+# We tune the model (Parameters in modelLookup("C5.0"))...
+TuneGrid <- expand.grid(trials = seq(from = 15, to = 25, by = 5), 
+                        model = "tree", 
+                        winnow = TRUE)
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.c50 <- train(x = train.x, y = train.y, method="C5.0", metric = metric, 
+                   trControl = TrainControl, na.action = na.pass, tuneGrid = TuneGrid)
+model.c50.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.c50)
+model.c50
+model.c50.time
+
+# We save the model and free memory
+save(model.c50, model.c50.time, file = "~/data/model-c50.RData")
+rm(model.c50, model.c50.time)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### RPART
+
+```{r model-rpart, echo=TRUE, message=FALSE, warning=FALSE}
+                             
+# We tune the model (Parameters in modelLookup("rpart"))...
+TuneGrid <- expand.grid(cp = seq(from = 0, to = 0.0001, length = 10))
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.rpart <- train(x = train.x, y = train.y, method="rpart", metric = metric, 
+                     trControl = TrainControl, na.action = na.pass, tuneGrid = TuneGrid)
+model.rpart.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.rpart)
+model.rpart
+model.rpart.time
+
+# We save the model and free memory
+save(model.rpart, model.rpart.time, file = "~/data/model-rpart.RData")
+rm(model.rpart, model.rpart.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### KNN
+
+```{r model-knn, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("knn"))...
+TuneGrid <- expand.grid(k = seq(from = 2, to = 5, by = 1))
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.knn <- train(x = train.x, y = train.y, method="knn", metric = metric, 
+                   trControl = TrainControl, tuneGrid = TuneGrid)
+model.knn.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.knn)
+model.knn
+model.knn.time
+
+# We save the model and free memory
+save(model.knn, model.knn.time, file = "~/data/model-knn.RData")
+rm(model.knn, model.knn.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+### RANGER
+
+```{r model-ranger, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("ranger"))...
+TuneGrid <- expand.grid(mtry = seq(from = 16, to = 19, by = 1), 
+                        splitrule = "extratrees", min.node.size = 1)
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.ranger <- train(x = train.x, y = train.y, method="ranger", metric = metric, 
+                      trControl = TrainControl, num.threads = 1, tuneGrid = TuneGrid)
+model.ranger.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.ranger)
+model.ranger
+model.ranger.time
+
+# We save the model and free memory
+save(model.ranger, model.ranger.time, file = "~/data/model-ranger.RData")
+rm(model.ranger, model.ranger.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### NAIVE BAYES
+
+```{r model-naivebayes, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("naive_bayes"))...
+TuneGrid <- expand.grid(laplace = c(0, 1), 
+                        usekernel = c(TRUE, FALSE), 
+                        adjust = 1)
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.naivebayes <- train(x = train.x, y = train.y, method="naive_bayes", metric = metric,
+                          trControl = TrainControl, na.action = na.pass, tuneGrid = TuneGrid)
+model.naivebayes.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.naivebayes)
+model.naivebayes
+model.naivebayes.time
+
+# We save the model and free memory
+save(model.naivebayes, model.naivebayes.time, file = "~/data/model-naivebayes.RData")
+rm(model.naivebayes, model.naivebayes.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### XGBOOST
+
+```{r model-xgbtree, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("xgbTree"))...
+TuneGrid <- expand.grid(nrounds = c(150, 160, 170), 
+                        max_depth = c(3, 4), 
+                        eta = c(0.4, 0.5), 
+                        gamma = 0 , 
+                        colsample_bytree = c(0.9), 
+                        min_child_weight = 1, subsample = c(0.9, 1))
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.xgboost <- train(x = train.x, y = train.y, method="xgbTree", metric = metric, 
+                       trControl = TrainControl, nthread = 1, tuneGrid = TuneGrid)
+model.xgboost.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.xgboost)
+model.xgboost
+model.xgboost.time
+
+# We save the model and free memory
+save(model.xgboost, model.xgboost.time, file = "~/data/model-xgboost.RData")
+rm(model.xgboost, model.xgboost.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### NEURONAL NETWORK
+
+```{r model-neuralnet, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("nnet"))...
+TuneGrid <- expand.grid(size = seq(from = 23, to = 29, by = 1), 
+                        decay = seq(from = 0.1, to = 1, length = 4)) 
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.nnet <- train(x = train.x, y = train.y, method="nnet", metric = metric, 
+                    trControl = TrainControl, na.action = na.pass, tuneGrid = TuneGrid)
+model.nnet.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.nnet)
+model.nnet
+model.nnet.time
+
+# We save the model and free memory
+save(model.nnet, model.nnet.time, file = "~/data/model-nnet.RData")
+rm(model.nnet, model.nnet.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+### GLMNET
+
+```{r model-glmnet, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We tune the model (Parameters in modelLookup("glmnet"))
+TuneGrid <- expand.grid(alpha = seq(from = 0, to = 2, by = 0.25), 
+                        lambda = seq(from = 0.0001, to = 0.0004, length = 4)) 
+
+# ...and train the model
+registerDoParallel(parallelCluster)
+start.time <- Sys.time() %>% as_datetime()
+set.seed(7)
+model.glmnet <- train(x = train.x, y = train.y, method="glmnet", metric = metric, 
+                      trControl = TrainControl, tuneGrid = TuneGrid)
+model.glmnet.time <- difftime(as_datetime(Sys.time()), start.time, units = "hours")
+
+# We take a look at the model performance
+plot(model.glmnet)
+model.glmnet
+model.glmnet.time
+
+# We save the model and free memory
+save(model.glmnet, model.glmnet.time, file = "~/data/model-glmnet.RData")
+rm(model.glmnet, model.glmnet.time, TuneGrid)
+gc(verbose = FALSE, full = TRUE)
+
+```
+
+## Model Comparison
+
+After training eight different models we compare their performance.
+
+```{r loadmodels, echo=TRUE, message=FALSE, warning=FALSE}
+
+# We load the previously trained models
+load(file = "~/data/model-rpart.RData")
+load(file = "~/data/model-knn.RData")
+load(file = "~/data/model-ranger.RData")
+load(file = "~/data/model-xgboost.RData")
+load(file = "~/data/model-naivebayes.RData")
+load(file = "~/data/model-nnet.RData")
+load(file = "~/data/model-glmnet.RData")
+load(file = "~/data/model-c50.RData")
+
+# We summarize the accuracy of models
+results <- resamples(list(rpart = model.rpart, knn = model.knn, ranger = model.ranger,
+                          naivebayes = model.naivebayes, xgboost = model.xgboost, 
+                          nnet = model.nnet, glmnet = model.glmnet, c50 = model.c50))
+
+```
+
+Now that we have fit our models, we compare them regarding their respective performance. In order to compare our models, we use the metrics ROC (actually area under curve) and sensitivity as well as specificity.
+
+```{r model-performance}
+
+# We take a first look at the models overall accuracies
+dotplot(results, scales = scales, strip = strip)
+
+# Show all model training times in comparison
+data.frame(model = c("ranger", "c50", "xgboost", "rpart", "knn", "naivebayes", 
+                      "glmnet", "nnet"),
+           time = c(model.ranger.time, model.c50.time, model.xgboost.time, 
+                    model.rpart.time, model.knn.time, model.naivebayes.time, 
+                    model.glmnet.time, model.nnet.time)) #%>% arrange(desc(time))
+
+```
+
+A first look at the used training times also show a big bandwidth of time consumption over all models. Ranked by their overall ROC performance, our top three models are ranger, c50 and xgboost. Lets take a closer look to our top 3 models:
+
+```{r model-performance-top3}
+
+# We summarize the accuracy of models
+results <- resamples(list(c50 = model.c50, xgboost = model.xgboost, ranger = model.ranger))
+
+# We take a first look at the models overall accuracies
+bwplot(results, scales = scales, strip = strip)
+
+# Show top 3 model training times in comparison
+data.frame(model = c("xgboost", "ranger", "c50"), 
+           time = c(model.xgboost.time, model.ranger.time, model.c50.time)) %>% arrange(desc(time))
+
+```
+
+When it comes to overall ROC and sensitivity performance, our ranger model is clearly the winner. If we take a look at the specificity it is not so clear anymore, since our top three models have similar specificity performance. Our ranger model took more than twice as much time as the xgboost model and even more than ten times more than the c50 model.
+
+## Predictions
+In this final step we will use our top three models to predict outcomes and evaluate their performance on the test data.
+
+```{r predict-top3}
+
+############## Make Predictions ############## 
+# RANGER
+model.ranger.predictions <- predict(model.ranger, test.x, na.action = na.pass)
+# C50
+model.c50.predictions <- predict(model.c50, test.x, na.action = na.pass)
+# XGBOOST
+model.xgboost.predictions <- predict(model.xgboost, test.x, na.action = na.pass)
+
+############## Evaluate Performance with Confusion Matrix ############## 
+# RANGER
+confusionMatrix(reference = test.y, data = model.ranger.predictions, mode = "everything")
+# C50
+confusionMatrix(reference = test.y, data = model.c50.predictions, mode = "everything")
+# XGBOOST
+confusionMatrix(reference = test.y, data = model.xgboost.predictions, mode = "everything") 
+
+```
+
+Based on the outcome of our test data, our xgboost model gets the best overall accuracy, while ranger is still second. c50 takes the third place.
+
+# Results
+
+We will break down the results into three categories: costs, in-sample performance and out-of-sample performance.
+
+## Costs
+The ranger model took more than twice as much time as the xgboost model and even more than ten times more than the c50 model. If computing costs (time, money) are a critical decision factor to choose the correct model this has to be considered.    
+
+## In-sample performance
+The ranger model  does not only provide the best sensitivity, it also provides the overall best specificity. C50 and xgboost show not that good results.
+
+## Out-of-sample performance
+When it comes to the overall performance and specificity, xgboost shows the best results compared to the other two models. If the model needs to have the best sensitivity, the ranger model delivers the best result (although ~0.5276 is not really a good result).  
+
+# Conclusion
+We used the dataset of a credit card company from Taiwan where we trained models that predict if a customer will default or not. Unfortunately, the out-of-sample performance could be better (especially regarding to the sinsitivity). Evaluating additional models and their performance could probably help get better results.
+
+Another possible next step could be the usage of ensembles, which usually gives the results another boost but takes a lot more system ressources than our system environment provided (our system had 8 Cores with 32GBM RAM). 
+
+With a bigger number of cpu cores and system memory it might also be interesting using more than just one version of the 80/20 data split, since we might not have gotten the best result with our data partition.
+
+
